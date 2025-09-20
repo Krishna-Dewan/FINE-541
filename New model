@@ -1,0 +1,79 @@
+#Portfolio Optimization: Strategic Benchmark-Centric Allocation
+
+A quantitative framework for optimizing portfolio allocation against a user-defined benchmark. This tool is designed for investors transitioning from a concentrated position to a diversified portfolio while aiming to maintain or exceed benchmark performance.
+
+## Overview
+
+This software implements a disciplined portfolio construction methodology that integrates investor forecasts with financial theory. It determines the optimal allocation to maximize the risk-adjusted return of a new portfolio relative to a specified benchmark (typically the investor's original concentrated asset).
+
+## Core Objective
+
+To answer the strategic question: 
+
+**"Given a portfolio concentrated in a single asset (XCV) and forward-looking price targets for alternative assets, what is the optimal set of trades to execute so the new diversified portfolio is expected to outperform the original concentrated portfolio on a risk-adjusted basis?"**
+
+## Methodology
+
+### Data Processing
+- **Input:** Historical price data for all assets and relevant foreign exchange rates
+- **Processing:** Handles multiple CSV files, converts USD-denominated prices to CAD, and aligns all historical time series by date
+- **Output:** Clean, consolidated matrix of daily CAD-denominated prices
+
+### Forecasting Approach
+- **Benchmark Asset (XCV):** Expected return derived from Capital Asset Pricing Model (CAPM)
+- **Active Assets (LAS, AA, GLD):** Expected return calculated from user-provided price targets
+
+### Risk Modeling
+- **Systematic Risk:** Portion of asset risk attributable to benchmark movements (quantified by beta)
+- **Idiosyncratic Risk:** Asset-specific risk uncorrelated with the benchmark (reducible through diversification)
+- The covariance matrix is constructed explicitly from these components
+
+### Optimization
+- Maximizes Sharpe Ratio (return per unit of risk)
+- Incorporates practical constraints (minimum/maximum allocation limits)
+- Solves for optimal portfolio weights using mathematical optimization algorithms
+
+## Performance Metrics
+
+The framework evaluates proposed portfolios using institutional standard metrics:
+
+- **Expected Return & Volatility:** Absolute forecasted annual return and risk
+- **Jensen's Alpha:** Excess return over benchmark, adjusted for beta exposure
+- **Tracking Error:** Standard deviation of portfolio returns relative to benchmark (measures active risk)
+- **Information Ratio:** Alpha divided by Tracking Error (excess return per unit of active risk)
+
+## Key Outputs
+
+1. **Optimal Allocation Weights:** Recommended percentage allocation for each asset
+2. **Explicit Trade Instructions:** Dollar amounts to buy/sell for portfolio transition
+3. **Comparative Performance Analysis:** Projection of optimal portfolio vs. benchmark performance
+
+## Interpretation Guide
+
+### Information Ratio (IR) Assessment:
+- **IR > 0.5:** Strong strategy with significant excess return for active risk taken
+- **IR > 0:** Positive expected excess return (evaluate magnitude relative to goals)
+- **IR ≤ 0:** Strategy not expected to outperform benchmark after risk adjustment
+
+### Additional Signals:
+- **Positive Jensen's Alpha:** Outperformance attributable to asset selection skill rather than additional benchmark risk
+- **Tracking Error:** Level of active risk relative to benchmark
+
+## Intended Use Case
+
+This framework is designed for investors who:
+- Seek to reduce single-asset concentration risk systematically
+- Have developed firm-specific views on alternative investments
+- Require a structured process to translate qualitative views into quantitative allocations
+- Demand pre-trade analysis of expected risk/return profile versus status quo
+
+## Project Structure
+
+
+
+## Implementation
+
+The tool is implemented in R using:
+- `CVXR` for convex optimization
+- `dplyr`, `purrr` for data manipulation
+- `quantmod`, `PerformanceAnalytics` for financial analysis
