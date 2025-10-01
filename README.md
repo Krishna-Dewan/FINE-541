@@ -39,15 +39,18 @@ stock_tickers # Asset tickers (XCV, LAS, AA, GLD, LNF, HLF, NPI)
 
 2. Portfolio Parameters
 
+```r
 portfolio_value <- 290898.22  # Total portfolio value (USD)
 current_w <- c(XCV = 0.376, LAS = 0.1873, AA = 0.0987, GLD = 0.0636, LNF = 0, HLF = 0, NPI = 0, Cash = 0.2744)
+```
 
-    Defines the current portfolio weights.
-
-    Includes a Cash component.
+    - Defines the current portfolio weights.
+    
+    - Includes a Cash component.
 
 3. Expected Price Targets
 
+```r
 expected_prices <- c(
   LAS = 254,
   AA  = 33.91,
@@ -56,7 +59,7 @@ expected_prices <- c(
   HLF = 21.39,
   NPI = 27.62
 )
-
+```
     User-defined expected prices for individual assets.
 
     XCV’s return is derived via CAPM and adjusted for fees.
