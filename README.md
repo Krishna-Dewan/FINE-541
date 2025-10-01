@@ -26,13 +26,15 @@ library(CVXR)      # for convex optimization
 library(ggplot2)   # for visualization
 library(tidyr)
 ```
-##Parameters
+## Parameters
+
 1. Data & File Inputs
 
+```r
 stock_files   # CSV files for each asset's historical prices
 stock_tickers # Asset tickers (XCV, LAS, AA, GLD, LNF, HLF, NPI)
 
-
+```
 - Data is pulled for the last 252 trading days (~12 months).
 
 - XCV is treated as the benchmark.
