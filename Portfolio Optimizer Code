@@ -1,0 +1,450 @@
+---
+title: "Portfolio Optimization Tool Final"
+author: "Krishna Dewan"
+date: "`r Sys.Date()`"
+output: html_notebook
+---
+
+# Libraries 
+```{r}
+library(dplyr)
+library(readr)
+library(purrr)
+library(zoo)
+library(CVXR)
+library(ggplot2)
+library(tidyr)
+```
+
+#PARAMETER SECTION
+```{r}
+# ---- 1. File and Data Parameters ----
+stock_files <- c("New dataset/XCV ETF Stock Price History(1).csv",
+                 "New dataset/Lassonde Industries Stock Price History(1).csv", 
+                 "New dataset/Alcoa Stock Price History(1).csv",
+                 "New dataset/GLD ETF Stock Price History(1).csv",
+                 "New dataset/Leon's Furniture Limited Stock Price History(1).csv",
+                 "New dataset/High Liner Foods Stock Price History(1).csv",
+                 "New dataset/Northland Power Stock Price History(1).csv")
+stock_tickers <- c("XCV", "LAS", "AA", "GLD", "LNF", "HLF", "NPI")
+
+# ---- 2. Portfolio Parameters ----
+portfolio_value <- 290898.22
+current_w <- c(XCV = 0.376, LAS = 0.1873, AA = 0.0987, GLD = 0.0636, LNF = 0, HLF = 0, NPI = 0, Cash = 0.2744)
+
+# ---- 3. Expected Price Targets ----
+expected_prices <- c(
+  LAS = 254,
+  AA  = 33.91, 
+  GLD = 362,
+  LNF = 35.57,
+  HLF = 21.39,
+  NPI = 27.62
+)
+# XCV will be calculated via CAPM
+
+# ---- 4. Risk-Free Rate and XCV Fees ----
+Rf <- 0.04
+xcv_management_fee <- 0.0050  # 0.50%
+xcv_mer <- 0.0055             # 0.55%
+xcv_total_fees <- xcv_management_fee + xcv_mer  # 1.05%
+
+# ---- 5. Optimization Constraints ----
+min_weights <- c(XCV = 0.15, LAS = 0.10, AA = 0.00, GLD = 0.08, LNF = 0.05, HLF = 0.1, NPI = 0.05, Cash = 0.06)
+max_weights <- c(XCV = 0.80, LAS = 0.30, AA = 0.30, GLD = 0.12, LNF = 0.30, HLF = 0.30, NPI = 0.30, Cash = 0.10)
+#min_weights <- c(XCV = 0, LAS = 0, AA = 0, GLD = 0.08, LNF = 0, HLF = 0.1, NPI = 0, Cash = 0.06)
+#max_weights <- c(XCV = 1, LAS = 0, AA = 0, GLD = 0.08, LNF = 0, HLF = 0.1, NPI = 0, Cash = 0.08)
+#max_weights <- c(XCV = 1, LAS = 1, AA = 1, GLD = 0.12, LNF = 1, HLF = 1, NPI = 1, Cash = 0.10)
+w_cash_target <- 0.08
+
+# ---- 6. Cost and Penalty Parameters ----
+transaction_cost_dollars <- 50
+lambda_cash <- 50
+risk_aversion <- 0.05
+
+# ---- 7. Regularization Parameters ----
+covariance_epsilon <- 1e-6
+```
+
+# EXECUTION SECTION 
+```{r}
+# ---- 1. Data Loading and Preparation ----
+read_stock <- function(file, ticker) {
+  df <- read_csv(file, 
+                 col_types = cols(
+                   Date = col_character(),
+                   Price = col_double(),
+                   Open = col_double(),
+                   High = col_double(), 
+                   Low = col_double(),
+                   Vol. = col_character(),
+                   `Change %` = col_character()
+                 ),
+                 show_col_types = FALSE) %>%
+    select(Date, Price)
+  
+  # Convert dates from MM/DD/YYYY format
+  df$Date <- as.Date(df$Date, format = "%m/%d/%Y")
+  
+  # KEEP ONLY LAST 12 MONTHS OF DATA (~252 trading days)
+  df <- head(df, 252)  # This takes the most recent 252 rows (approx 12 months)
+  
+  df <- df %>% rename(!!ticker := Price)
+  return(df)
+}
+
+stock_list <- map2(stock_files, stock_tickers, read_stock)
+all_stocks <- reduce(stock_list, function(x, y) full_join(x, y, by = "Date")) %>%
+  arrange(Date)
+
+all_stocks[,-1] <- na.locf(all_stocks[,-1], na.rm = FALSE)
+
+
+price_matrix <- as.matrix(all_stocks[, -1])
+colnames(price_matrix) <- colnames(all_stocks)[-1]
+rownames(price_matrix) <- as.character(all_stocks$Date)
+
+returns <- diff(log(price_matrix))
+returns <- returns[complete.cases(returns), , drop = FALSE]
+
+# ---- 2. Calculate Expected Returns (WITH XCV FEES) ----
+current_prices <- as.numeric(tail(price_matrix, 1))
+names(current_prices) <- colnames(price_matrix)
+
+xcv_daily_returns <- returns[, "XCV"]
+market_return_annual <- mean(xcv_daily_returns) * 252
+xcv_forecast_return <- Rf + 1 * (market_return_annual - Rf)
+xcv_forecast_return_after_fees <- xcv_forecast_return - xcv_total_fees
+
+xcv_start_price <- current_prices["XCV"]
+xcv_projected_price <- xcv_start_price * (1 + xcv_forecast_return_after_fees)
+
+# Create full expected prices vector including XCV and all other stocks
+expected_prices_full <- c(
+  XCV = xcv_projected_price,
+  expected_prices  # LAS, AA, GLD, LNF, HLF, NPI from parameters
+)
+
+expected_returns_annual <- (expected_prices_full - current_prices) / current_prices
+names(expected_returns_annual) <- names(expected_prices_full)
+
+
+# ---- 3. Calculate CAPM Parameters Relative to XCV Benchmark ----
+benchmark_returns <- returns[, "XCV"]
+benchmark_variance_annual <- var(benchmark_returns) * 252
+benchmark_vol_annual <- sd(benchmark_returns) * sqrt(252)
+
+# Calculate Betas relative to XCV for all stocks
+betas <- sapply(1:ncol(returns), function(i) {
+  cov(returns[, i], benchmark_returns) / var(benchmark_returns)
+})
+names(betas) <- colnames(returns)
+
+# Calculate expected returns using CAPM (using gross return before fees for CAPM)
+mu_capm <- Rf + betas * (xcv_forecast_return - Rf)  # Use before-fee return for CAPM
+
+# Calculate Alpha (compare your after-fee forecast to CAPM expectation)
+alphas <- expected_returns_annual - mu_capm[names(expected_returns_annual)]
+
+# Decompose Volatility (Annualized)
+annual_volatility <- apply(returns, 2, sd) * sqrt(252)
+systematic_vol <- betas * benchmark_vol_annual
+idiosyncratic_vol <- sqrt(pmax(annual_volatility^2 - systematic_vol^2, 0))
+
+# Print analysis
+capm_table <- data.frame(
+  Asset = colnames(returns),
+  Your_Forecast = expected_returns_annual,
+  CAPM_Return = mu_capm,
+  Alpha = alphas,
+  Beta_vs_XCV = betas,
+  Total_Vol = annual_volatility,
+  Syst_Vol = systematic_vol,
+  Idio_Vol = idiosyncratic_vol
+)
+print("CAPM Analysis with Your Custom Forecasts (XCV return includes fee adjustment):")
+print(capm_table, digits = 4)
+
+# ---- 4. Build Covariance Matrix ----
+Sigma_daily <- cov(returns)
+
+if (any(eigen(Sigma_daily)$values <= 0)) {
+  cat("Covariance matrix is not positive definite. Adding regularization...\n")
+  Sigma_daily <- Sigma_daily + diag(covariance_epsilon, ncol(Sigma_daily))
+}
+
+Sigma_annual <- Sigma_daily * 252
+Sigma_systematic <- outer(betas, betas) * benchmark_variance_annual
+Sigma_idiosyncratic <- diag(idiosyncratic_vol^2)
+Sigma <- Sigma_systematic + Sigma_idiosyncratic
+
+if (any(eigen(Sigma)$values <= 0)) {
+  cat("Final covariance matrix is not positive definite. Adding regularization...\n")
+  Sigma <- Sigma + diag(covariance_epsilon, ncol(Sigma))
+}
+
+# ---- 5. Expand for Cash ----
+n_risky <- ncol(returns)
+mu_full <- c(expected_returns_annual, Rf)
+
+Sigma_full <- matrix(0, n_risky + 1, n_risky + 1)
+Sigma_full[1:n_risky, 1:n_risky] <- Sigma
+colnames(Sigma_full) <- c(colnames(returns), "Cash")
+rownames(Sigma_full) <- c(colnames(returns), "Cash")
+
+# Check feasibility
+if (sum(min_weights) > 1) {
+  stop("INFEASIBLE: Sum of min_weights is > 100%. Please relax your constraints.")
+}
+
+# ---- 6. Portfolio Optimization ----
+w <- Variable(n_risky + 1)
+
+# Ensure current_w aligns with the assets we have data for
+current_w_risky <- current_w[names(current_w) %in% c(colnames(returns), "Cash")]
+current_w_risky <- current_w_risky[colnames(returns)] # Reorder to match returns columns
+
+a <- w[1:n_risky] - current_w_risky
+tc_rate <- transaction_cost_dollars / portfolio_value
+transaction_cost <- tc_rate * sum(abs(a))
+
+
+
+cash_penalty <- lambda_cash * (w[n_risky + 1] - w_cash_target)^2
+
+portfolio_return <- t(mu_full) %*% w
+portfolio_risk <- quad_form(w, Sigma_full)
+
+objective <- Maximize(portfolio_return - 
+                        risk_aversion * portfolio_risk - 
+                        transaction_cost - 
+                        cash_penalty)
+
+# Ensure constraints align with the assets we have
+min_weights_aligned <- min_weights[c(colnames(returns), "Cash")]
+max_weights_aligned <- max_weights[c(colnames(returns), "Cash")]
+
+constraints <- list(
+  sum(w) == 1,
+  w >= min_weights_aligned,
+  w <= max_weights_aligned
+)
+
+problem <- Problem(objective, constraints)
+
+tryCatch({
+  result <- solve(problem, solver = "ECOS")
+}, error = function(e) {
+  cat("ECOS solver failed, trying OSQP...\n")
+  result <- solve(problem, solver = "OSQP")
+})
+
+if (result$status != "optimal") {
+  cat("Warning: Solver status:", result$status, "\n")
+  cat("Trying with relaxed constraints...\n")
+  
+  constraints <- list(
+    sum(w) == 1,
+    w >= 0
+  )
+  
+  problem <- Problem(objective, constraints)
+  result <- solve(problem)
+}
+
+if (result$status != "optimal") {
+  stop("Solver failed to find an optimal solution. Status: ", result$status)
+}
+
+# ---- 7. Extract Results ----
+optimal_w <- result$getValue(w)
+optimal_w <- as.vector(optimal_w)
+names(optimal_w) <- c(colnames(returns), "Cash")
+optimal_w <- optimal_w / sum(optimal_w)
+
+cat("\n=== OPTIMAL PORTFOLIO WEIGHTS ===\n")
+print(round(optimal_w, 4))
+
+current_dollars <- current_w[c(names(optimal_w))] * portfolio_value
+optimal_dollars <- optimal_w * portfolio_value
+trade_orders <- optimal_dollars - current_dollars
+
+# Count how many stocks need trading (any non-zero trade amount)
+number_of_trades <- sum(trade_orders != 0)
+# Total transaction cost
+transaction_cost <- transaction_cost_dollars * number_of_trades
+
+cat("\n=== RECOMMENDED TRADES ($) ===\n")
+trades_df <- data.frame(
+  Asset = names(optimal_w),
+  Current_Weight = round(current_w[names(optimal_w)], 4),
+  Optimal_Weight = round(optimal_w, 4),
+  Trade_Amount = round(trade_orders, 2)
+)
+print(trades_df)
+
+# ---- 8. PERFORMANCE METRICS ----
+Rp <- as.numeric(t(mu_full) %*% optimal_w)
+Vp <- as.numeric(t(optimal_w) %*% Sigma_full %*% optimal_w)
+sd_p <- sqrt(Vp)
+
+Rb <- expected_returns_annual["XCV.XCV"]
+sd_b <- annual_volatility["XCV"]
+
+downside_returns <- returns[returns[, "XCV"] < 0, "XCV", drop = FALSE]
+if (nrow(downside_returns) > 1) {
+  downside_deviation_annual <- sd(downside_returns) * sqrt(252)
+} else {
+  downside_deviation_annual <- sd_b * 0.7
+}
+
+sharpe_p <- (Rp - Rf) / sd_p
+sharpe_b <- (Rb - Rf) / sd_b
+sortino_p <- (Rp - Rf) / downside_deviation_annual
+sortino_b <- (Rb - Rf) / downside_deviation_annual
+
+# Benchmark vector (100% XCV)
+benchmark_vec_risky <- rep(0, n_risky)
+names(benchmark_vec_risky) <- colnames(returns)
+benchmark_vec_risky["XCV"] <- 1
+
+cov_pb <- as.numeric(t(optimal_w[1:n_risky]) %*% Sigma %*% benchmark_vec_risky)
+beta_p <- cov_pb / benchmark_variance_annual
+
+alpha_p <- (Rp - Rf) - beta_p * (Rb - Rf)
+
+active_weights_risky <- optimal_w[1:n_risky] - benchmark_vec_risky
+tracking_error <- sqrt(as.numeric(t(active_weights_risky) %*% Sigma %*% active_weights_risky))
+
+active_return <- Rp - Rb
+information_ratio <- ifelse(tracking_error > 0, active_return / tracking_error, NA)
+
+cat("\n=== PERFORMANCE vs. XCV BENCHMARK ===\n")
+cat("Expected Portfolio Return:    ", round(Rp, 4), "\n")
+cat("Expected Benchmark Return:    ", round(Rb, 4), "\n")
+cat("Jensen's Alpha:               ", round(alpha_p, 4), "\n")
+cat("Active Return:                ", round(active_return, 4), "\n")
+cat("\n")
+cat("Portfolio Volatility:         ", round(sd_p, 4), "\n")
+cat("Benchmark Volatility:         ", round(sd_b, 4), "\n")
+cat("Tracking Error:               ", round(tracking_error, 4), "\n")
+cat("Portfolio Beta vs. XCV:       ", round(beta_p, 4), "\n")
+cat("\n")
+cat("Portfolio Sharpe Ratio:       ", round(sharpe_p, 4), "\n")
+cat("Benchmark Sharpe Ratio:       ", round(sharpe_b, 4), "\n")
+cat("Portfolio Sortino Ratio:      ", round(sortino_p, 4), "\n")
+cat("Benchmark Sortino Ratio:      ", round(sortino_b, 4), "\n")
+cat("Information Ratio:            ", round(information_ratio, 4), "\n")
+cat("Transaction Cost Impact:      $", round(transaction_cost), "\n")
+cat("Cash Penalty Impact:          $", round(result$getValue(cash_penalty) * portfolio_value, 2), "\n")
+
+# ---- 9. Interpretation ----
+cat("\n=== STRATEGY IMPLICATIONS ===\n")
+if (!is.na(alpha_p)) {
+  if (alpha_p > 0) {
+    cat("Portfolio expected to outperform XCV by ", round(alpha_p * 100, 2), "% annually\n")
+    cat("after accounting for XCV fees and portfolio risk.\n")
+  } else {
+    cat("Portfolio not expected to outperform XCV on a risk-adjusted basis.\n")
+  }
+} else {
+  cat("Alpha calculation unavailable - check benchmark return and beta calculations\n")
+}
+
+if (!is.na(information_ratio)) {
+  cat("Information Ratio: ", round(information_ratio, 2), "\n")
+  if (information_ratio > 0.5) {
+    cat("Strong active management potential\n")
+  } else if (information_ratio > 0) {
+    cat("Modest active management potential\n")
+  } else {
+    cat("Not expected to add value beyond the benchmark\n")
+  }
+} else {
+  cat("Information Ratio: Not calculable (check tracking error)\n")
+}
+
+if (!is.na(sortino_p)) {
+  cat("Sortino Ratio (vs Sharpe): ", round(sortino_p, 2), " (focuses on downside risk only)\n")
+} else {
+  cat("Sortino Ratio: Not calculable\n")
+}
+
+# --- 11a. Efficient Frontier vs Optimal Portfolio vs Benchmark ---
+# Generate random portfolios for visualization
+set.seed(123)
+n_portfolios <- 5000
+rand_w <- matrix(runif(n_portfolios * n_risky), nrow = n_portfolios, ncol = n_risky)
+rand_w <- rand_w / rowSums(rand_w)
+
+rand_returns <- rand_w %*% expected_returns_annual[1:n_risky]
+rand_risk <- apply(rand_w, 1, function(w_row) sqrt(t(w_row) %*% Sigma %*% w_row))
+
+# Create data frames for all points
+ef_df <- data.frame(Return = rand_returns, Risk = rand_risk)
+
+# Optimal portfolio (from optimization)
+opt_df <- data.frame(
+  Return = sum(optimal_w[1:n_risky] * expected_returns_annual[1:n_risky]),
+  Risk = sqrt(t(optimal_w[1:n_risky]) %*% Sigma %*% optimal_w[1:n_risky]),
+  Type = "Optimal Portfolio"
+)
+# Benchmark portfolio (100% XCV)
+benchmark_df <- data.frame(
+  Return = expected_returns_annual["XCV.XCV"],
+  Risk = annual_volatility["XCV"],
+  Type = "Benchmark (100% XCV)"
+)
+
+# Combine all points
+all_points <- rbind(
+  data.frame(ef_df, Type = "Random Portfolios"),
+  opt_df,
+  benchmark_df
+)
+
+ggplot(all_points, aes(x = Risk, y = Return, color = Type)) +
+  geom_point(data = subset(all_points, Type == "Random Portfolios"), alpha = 0.3, size = 1) +
+  geom_point(data = subset(all_points, Type != "Random Portfolios"), size = 4) +
+  scale_color_manual(values = c("Random Portfolios" = "lightblue", 
+                               "Optimal Portfolio" = "red", 
+                               "Benchmark (100% XCV)" = "darkgreen")) +
+  labs(title = "Efficient Frontier: Optimal Portfolio vs Benchmark",
+       x = "Portfolio Risk (Std Dev)",
+       y = "Portfolio Expected Return",
+       color = "Portfolio Type") +
+   theme_minimal() +
+  theme(legend.position = "bottom")
+# --- 11b. Cumulative Return Comparison (Portfolio vs XCV) ---
+cum_returns <- cumprod(1 + returns)  # daily cumulative returns
+cum_portfolio <- cumprod(1 + returns %*% optimal_w[1:n_risky])
+cum_xcv <- cumprod(1 + returns[, "XCV"])
+
+cum_df <- data.frame(
+  Date = as.Date(rownames(returns)),
+  Portfolio = cum_portfolio,
+  XCV = cum_xcv
+) %>%
+  pivot_longer(cols = -Date, names_to = "Asset", values_to = "CumulativeReturn")
+
+ggplot(cum_df, aes(x = Date, y = CumulativeReturn, color = Asset)) +
+  geom_line(size = 0.7) +
+  labs(title = "Cumulative Returns: Portfolio vs XCV",
+       y = "Cumulative Return") +
+  theme_minimal()
+
+# --- 11c. Risk Decomposition (Systematic vs Idiosyncratic) ---
+risk_decomp <- data.frame(
+  Asset = names(annual_volatility),
+  Systematic = systematic_vol^2,
+  Idiosyncratic = idiosyncratic_vol^2
+) %>%
+  pivot_longer(cols = c("Systematic", "Idiosyncratic"), names_to = "Type", values_to = "Variance")
+
+ggplot(risk_decomp, aes(x = Asset, y = Variance, fill = Type)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Risk Decomposition per Asset",
+       y = "Variance",
+       x = "Asset") +
+  theme_minimal()
+```
